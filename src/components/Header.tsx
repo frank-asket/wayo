@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldAlert, Activity, Cpu, Sparkles, RefreshCw, Send, Globe, LayoutDashboard } from 'lucide-react';
+import { ShieldAlert, Activity, Cpu, Sparkles, RefreshCw, Send, Globe, LayoutDashboard, Radio, FileText, Sliders } from 'lucide-react';
 
 interface HeaderProps {
   onSimulate: (scenario?: string) => void;
@@ -7,6 +7,10 @@ interface HeaderProps {
   isLoading: boolean;
   activeView: 'dashboard' | 'marketing';
   onViewChange: (view: 'dashboard' | 'marketing') => void;
+  isStreaming?: boolean;
+  onToggleStreaming?: () => void;
+  onOpenCompliance?: () => void;
+  onOpenRules?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({ 
@@ -14,7 +18,11 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenTester, 
   isLoading,
   activeView,
-  onViewChange
+  onViewChange,
+  isStreaming,
+  onToggleStreaming,
+  onOpenCompliance,
+  onOpenRules,
 }) => {
   return (
     <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-30 px-6 py-4">
@@ -82,6 +90,37 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Action Buttons */}
+          <button
+            id="rules-config-btn"
+            onClick={onOpenRules}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium transition"
+          >
+            <Sliders className="w-3.5 h-3.5 text-amber-400" />
+            <span>Rules</span>
+          </button>
+
+          <button
+            id="compliance-ledger-btn"
+            onClick={onOpenCompliance}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium transition"
+          >
+            <FileText className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Audit & SAR</span>
+          </button>
+
+          <button
+            id="toggle-stream-btn"
+            onClick={onToggleStreaming}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+              isStreaming
+                ? 'bg-rose-950/60 border-rose-800 text-rose-300'
+                : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Radio className={`w-3.5 h-3.5 ${isStreaming ? 'text-rose-400 animate-pulse' : 'text-slate-500'}`} />
+            <span>{isStreaming ? 'Live Stream: ON' : 'Continuous: OFF'}</span>
+          </button>
+
           <button
             id="open-tester-btn"
             onClick={onOpenTester}

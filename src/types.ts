@@ -28,11 +28,19 @@ export interface Transaction {
   merchant: string;
   category: string;
   location: string;
+  originLocation?: string;
+  locationCoords?: { lat: number; lng: number };
+  originCoords?: { lat: number; lng: number };
+  travelDistanceKm?: number;
+  timeDeltaMinutes?: number;
+  calculatedKmhSpeed?: number;
   deviceId: string;
   timestamp: string;
   fraudProbability: number;
   flagged: boolean;
   status: 'PENDING_REVIEW' | 'APPROVED' | 'FROZEN' | 'DISMISSED' | 'AUTO_APPROVED';
+  mobile2FAStatus?: 'NONE' | 'REQUESTED' | 'CONFIRMED_USER' | 'DENIED_FRAUD';
+  mobile2FAResponseTime?: string;
   llmInvestigation?: LLMInvestigation;
   riskFactors?: {
     amountDeviationRatio: number;
@@ -84,4 +92,18 @@ export interface SystemStats {
     medium: number;
     high: number;
   };
+}
+
+export interface FraudRule {
+  id: string;
+  name: string;
+  description: string;
+  field: 'amount' | 'velocity' | 'device' | 'country';
+  operator: 'GREATER_THAN' | 'EQUALS' | 'NOT_EQUALS' | 'EXCEEDS_RATIO';
+  thresholdValue: string | number;
+  action: 'FLAG' | 'STEP_UP_2FA' | 'FREEZE' | 'ALLOW';
+  enabled: boolean;
+  priority: number;
+  triggeredCount: number;
+  updatedAt: string;
 }

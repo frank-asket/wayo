@@ -1,23 +1,33 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { MetricsBar } from './components/MetricsBar';
 import { AnalyticsCharts } from './components/AnalyticsCharts';
 import { TransactionsTable } from './components/TransactionsTable';
 import { InvestigationDrawer } from './components/InvestigationDrawer';
 import { PipelineTester } from './components/PipelineTester';
-import { MarketingPage } from './components/MarketingPage';
+import { MarketingPage } from '@web/MarketingPage';
+import { MobilePushSimulator } from './components/MobilePushSimulator';
+import { AuditComplianceModal } from './components/AuditComplianceModal';
+import { RulesConfigModal } from './components/RulesConfigModal';
 import { Transaction, SystemStats } from './types';
+import { INITIAL_SYSTEM_STATS, INITIAL_TRANSACTIONS } from './data';
 import { ShieldCheck, AlertTriangle } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [stats, setStats] = useState<SystemStats | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [stats, setStats] = useState<SystemStats>(INITIAL_SYSTEM_STATS);
+  const [transactions, setTransactions] = useState<Transaction[]>(INITIAL_TRANSACTIONS);
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [isTesterOpen, setIsTesterOpen] = useState(false);
+  const [isComplianceOpen, setIsComplianceOpen] = useState(false);
+  const [isRulesOpen, setIsRulesOpen] = useState(false);
+  const [isMobilePushOpen, setIsMobilePushOpen] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'alert' } | null>(null);
-  const [activeView, setActiveView] = useState<'dashboard' | 'marketing'>('dashboard');
+  const [activeView, setActiveView] = useState<'dashboard' | 'marketing'>('marketing');
+
+  const streamIntervalRef = useRef<any>(null);
 
   const showNotification = (message: string, type: 'success' | 'alert' = 'success') => {
     setNotification({ message, type });
@@ -29,11 +39,11 @@ export const App: React.FC = () => {
   const fetchData = useCallback(async () => {
     try {
       const [statsRes, txRes] = await Promise.all([
-        fetch('/api/v1/stats'),
-        fetch('/api/v1/transactions'),
+        fetch('/api/v1/stats').catch(() => null),
+        fetch('/api/v1/transactions').catch(() => null),
       ]);
 
-      if (statsRes.ok && txRes.ok) {
+      if (statsRes && statsRes.ok && txRes && txRes.ok) {
         const statsData = await statsRes.json();
         const txData = await txRes.json();
         setStats(statsData);
@@ -46,7 +56,7 @@ export const App: React.FC = () => {
         }
       }
     } catch (err) {
-      console.error('Error fetching Wayo data:', err);
+      console.warn('Network request deferred or offline, using initialized state:', err);
     }
   }, [selectedTx]);
 
@@ -55,6 +65,34 @@ export const App: React.FC = () => {
     const interval = setInterval(fetchData, 8000);
     return () => clearInterval(interval);
   }, [fetchData]);
+
+  // Continuous stream simulator toggle
+  useEffect(() => {
+    if (isStreaming) {
+      const scenarios = ['readme', 'crypto_offramp', 'normal', 'card_not_present'];
+      streamIntervalRef.current = setInterval(async () => {
+        const randomScenario = scenarios[Math.floor(Math.random() * scenarios.length)];
+        try {
+          await fetch('/api/v1/simulate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scenario: randomScenario }),
+          });
+          fetchData();
+        } catch (e) {
+          console.error('Stream generation error:', e);
+        }
+      }, 5000);
+    } else {
+      if (streamIntervalRef.current) {
+        clearInterval(streamIntervalRef.current);
+        streamIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
+    };
+  }, [isStreaming, fetchData]);
 
   const handleSimulate = async (scenario?: string) => {
     setIsLoading(true);
@@ -108,6 +146,8 @@ export const App: React.FC = () => {
             ? `Account frozen for transaction ${id}`
             : action === 'ESCALATE'
             ? `Case ${id} escalated to Tier 2 SecOps`
+            : action === 'REQUEST_2FA'
+            ? `Mobile 2FA step-up dispatched to cardholder`
             : `Transaction ${id} actioned: ${action}`
         );
       }
@@ -115,6 +155,33 @@ export const App: React.FC = () => {
       console.error('Action error:', err);
     } finally {
       setIsActionLoading(false);
+    }
+  };
+
+  // Cardholder response from Mobile Push Simulator
+  const handleRespond2FA = async (decision: 'CONFIRMED_USER' | 'DENIED_FRAUD') => {
+    if (!selectedTx) return;
+    try {
+      const res = await fetch(`/api/v1/investigations/${selectedTx.id}/2fa-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        await fetchData();
+        if (data.transaction) {
+          setSelectedTx(data.transaction);
+        }
+        showNotification(
+          decision === 'CONFIRMED_USER'
+            ? `Customer authenticated via Biometric 2FA. Transaction approved.`
+            : `Customer reported unauthorized access! Account automatically frozen.`,
+          decision === 'CONFIRMED_USER' ? 'success' : 'alert'
+        );
+      }
+    } catch (err) {
+      console.error('2FA simulation error:', err);
     }
   };
 
@@ -135,6 +202,10 @@ export const App: React.FC = () => {
             isLoading={isLoading}
             activeView={activeView}
             onViewChange={setActiveView}
+            isStreaming={isStreaming}
+            onToggleStreaming={() => setIsStreaming(!isStreaming)}
+            onOpenCompliance={() => setIsComplianceOpen(true)}
+            onOpenRules={() => setIsRulesOpen(true)}
           />
 
           {/* Main Content Dashboard */}
@@ -183,8 +254,16 @@ export const App: React.FC = () => {
           <footer className="border-t border-slate-900 bg-slate-950/80 py-4 px-6 text-center text-xs text-slate-500 font-mono flex flex-col sm:flex-row items-center justify-between max-w-7xl mx-auto w-full">
             <span>Wayo Enterprise AI Fraud System • In-Flight Scoring & LLM Investigation Engine</span>
             <div className="flex items-center space-x-4 mt-2 sm:mt-0">
-              <button onClick={() => setActiveView('marketing')} className="text-cyan-400 hover:underline">
-                View Marketing & Architecture Specs
+              <button onClick={() => setIsComplianceOpen(true)} className="text-cyan-400 hover:underline">
+                Compliance & SAR Audit Ledger
+              </button>
+              <span>•</span>
+              <button onClick={() => setIsRulesOpen(true)} className="text-amber-400 hover:underline">
+                Rules Engine
+              </button>
+              <span>•</span>
+              <button onClick={() => setActiveView('marketing')} className="text-slate-400 hover:text-white">
+                Marketing Specs
               </button>
               <span>•</span>
               <button onClick={() => setIsTesterOpen(true)} className="text-slate-400 hover:text-white">
@@ -201,6 +280,7 @@ export const App: React.FC = () => {
         onClose={() => setSelectedTx(null)}
         onAction={handleAction}
         isActionLoading={isActionLoading}
+        onOpenMobile2FA={() => setIsMobilePushOpen(true)}
       />
 
       {/* Interactive Pipeline Tester Modal */}
@@ -211,6 +291,27 @@ export const App: React.FC = () => {
           fetchData();
           setActiveView('dashboard');
         }}
+      />
+
+      {/* Mobile 2FA / Biometric Simulator Modal */}
+      <MobilePushSimulator
+        isOpen={isMobilePushOpen}
+        transaction={selectedTx}
+        onClose={() => setIsMobilePushOpen(false)}
+        onRespond2FA={handleRespond2FA}
+      />
+
+      {/* Regulatory Compliance & SAR Ledger Modal */}
+      <AuditComplianceModal
+        isOpen={isComplianceOpen}
+        onClose={() => setIsComplianceOpen(false)}
+      />
+
+      {/* Rules Engine Configuration Modal */}
+      <RulesConfigModal
+        isOpen={isRulesOpen}
+        onClose={() => setIsRulesOpen(false)}
+        onRulesChanged={() => fetchData()}
       />
     </div>
   );

@@ -16,14 +16,17 @@ import {
   AlertTriangle,
   ArrowUpRight,
   FileText,
+  Navigation,
 } from 'lucide-react';
 import { Transaction } from '../types';
+import { GeoVelocityMap } from './GeoVelocityMap';
 
 interface InvestigationDrawerProps {
   transaction: Transaction | null;
   onClose: () => void;
   onAction: (id: string, action: 'FREEZE' | 'APPROVE' | 'REQUEST_2FA' | 'DISMISS' | 'ESCALATE', notes?: string) => Promise<void>;
   isActionLoading: boolean;
+  onOpenMobile2FA?: () => void;
 }
 
 export const InvestigationDrawer: React.FC<InvestigationDrawerProps> = ({
@@ -31,9 +34,10 @@ export const InvestigationDrawer: React.FC<InvestigationDrawerProps> = ({
   onClose,
   onAction,
   isActionLoading,
+  onOpenMobile2FA,
 }) => {
   const [analystNotes, setAnalystNotes] = useState('');
-  const [activeTab, setActiveTab] = useState<'narrative' | 'shap' | 'audit'>('narrative');
+  const [activeTab, setActiveTab] = useState<'narrative' | 'shap' | 'geovelocity' | 'audit'>('narrative');
 
   if (!transaction) return null;
 
@@ -44,6 +48,9 @@ export const InvestigationDrawer: React.FC<InvestigationDrawerProps> = ({
   const handleAction = async (action: 'FREEZE' | 'APPROVE' | 'REQUEST_2FA' | 'DISMISS' | 'ESCALATE') => {
     await onAction(transaction.id, action, analystNotes);
     setAnalystNotes('');
+    if (action === 'REQUEST_2FA' && onOpenMobile2FA) {
+      onOpenMobile2FA();
+    }
   };
 
   // SHAP waterfall feature impacts (from TRD requirement)
@@ -138,7 +145,20 @@ export const InvestigationDrawer: React.FC<InvestigationDrawerProps> = ({
           }`}
         >
           <BarChart2 className="w-3.5 h-3.5 text-cyan-400" />
-          <span>SHAP Waterfall Explainer</span>
+          <span>SHAP Waterfall</span>
+        </button>
+
+        <button
+          id="tab-geovelocity-btn"
+          onClick={() => setActiveTab('geovelocity')}
+          className={`flex items-center space-x-1.5 pb-2.5 text-xs font-semibold border-b-2 transition ${
+            activeTab === 'geovelocity'
+              ? 'border-rose-500 text-rose-300'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Navigation className="w-3.5 h-3.5 text-rose-400" />
+          <span>Geo-Velocity Radar</span>
         </button>
 
         <button
@@ -317,6 +337,11 @@ export const InvestigationDrawer: React.FC<InvestigationDrawerProps> = ({
               )}
             </div>
           </div>
+        )}
+
+        {/* TAB 3: Geo-Velocity Radar */}
+        {activeTab === 'geovelocity' && (
+          <GeoVelocityMap transaction={transaction} />
         )}
 
         {/* Behavioral Discrepancy & Transaction Facts Grid */}

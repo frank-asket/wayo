@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Filter, ShieldAlert, Sparkles, ChevronRight, CheckCircle2, Lock, ArrowUpRight } from 'lucide-react';
+import { Search, Filter, ShieldAlert, Sparkles, ChevronRight, CheckCircle2, Lock, ArrowUpRight, Download } from 'lucide-react';
 import { Transaction } from '../types';
 
 interface TransactionsTableProps {
@@ -146,6 +146,16 @@ export const TransactionsTable: React.FC<TransactionsTableProps> = ({
               Approved
             </button>
           </div>
+
+          <a
+            id="export-csv-btn"
+            href="/api/v1/export/transactions.csv"
+            download="wayo_transactions_export.csv"
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 hover:text-white transition"
+          >
+            <Download className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Export CSV</span>
+          </a>
         </div>
       </div>
 
@@ -215,7 +225,25 @@ export const TransactionsTable: React.FC<TransactionsTableProps> = ({
                       )}
                     </td>
                     <td className="py-3 px-4 whitespace-nowrap font-sans">
-                      {getStatusBadge(tx.status)}
+                      <div className="flex flex-col space-y-1">
+                        {getStatusBadge(tx.status)}
+                        {tx.mobile2FAStatus === 'REQUESTED' && (
+                          <span className="inline-flex items-center text-[10px] text-amber-400 font-mono">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping mr-1"></span>
+                            Awaiting 2FA
+                          </span>
+                        )}
+                        {tx.mobile2FAStatus === 'CONFIRMED_USER' && (
+                          <span className="inline-flex items-center text-[10px] text-emerald-400 font-mono">
+                            ✓ Biometric Verified
+                          </span>
+                        )}
+                        {tx.mobile2FAStatus === 'DENIED_FRAUD' && (
+                          <span className="inline-flex items-center text-[10px] text-rose-400 font-mono">
+                            ✕ Blocked by User
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <button

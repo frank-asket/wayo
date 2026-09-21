@@ -10,6 +10,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
+// Enable standard CORS headers so API calls within iFrame previews never fail
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  next();
+});
+
 const PORT = 3000;
 
 // In-Memory Feature Store & Behavioral Profiles (Mocked RAG Historical Store)
@@ -74,11 +82,19 @@ interface StoredTransaction {
   merchant: string;
   category: string;
   location: string;
+  originLocation?: string;
+  locationCoords?: { lat: number; lng: number };
+  originCoords?: { lat: number; lng: number };
+  travelDistanceKm?: number;
+  timeDeltaMinutes?: number;
+  calculatedKmhSpeed?: number;
   deviceId: string;
   timestamp: string;
   fraudProbability: number;
   flagged: boolean;
   status: 'PENDING_REVIEW' | 'APPROVED' | 'FROZEN' | 'DISMISSED' | 'AUTO_APPROVED';
+  mobile2FAStatus?: 'NONE' | 'REQUESTED' | 'CONFIRMED_USER' | 'DENIED_FRAUD';
+  mobile2FAResponseTime?: string;
   llmInvestigation?: {
     summary: string;
     reasons: string[];
@@ -126,6 +142,75 @@ interface AuditRecord {
 }
 
 // In-Memory MongoDB-style Audit Log Store (per TRD specifications)
+interface FraudRuleEntity {
+  id: string;
+  name: string;
+  description: string;
+  field: 'amount' | 'velocity' | 'device' | 'country';
+  operator: 'GREATER_THAN' | 'EQUALS' | 'NOT_EQUALS' | 'EXCEEDS_RATIO';
+  thresholdValue: string | number;
+  action: 'FLAG' | 'STEP_UP_2FA' | 'FREEZE' | 'ALLOW';
+  enabled: boolean;
+  priority: number;
+  triggeredCount: number;
+  updatedAt: string;
+}
+
+const fraudRulesStore: FraudRuleEntity[] = [
+  {
+    id: 'rule_vel_impossible',
+    name: 'Impossible Physical Velocity (>800 km/h)',
+    description: 'Triggers when sequential transactions indicate ground/air travel exceeding physical aircraft limits.',
+    field: 'velocity',
+    operator: 'GREATER_THAN',
+    thresholdValue: 800,
+    action: 'FLAG',
+    enabled: true,
+    priority: 1,
+    triggeredCount: 42,
+    updatedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+  },
+  {
+    id: 'rule_amt_spike',
+    name: 'Baseline Amount Deviation (>4.0x Peak)',
+    description: 'Flags payments exceeding cardholder 90-day mean transaction volume by 400% or more.',
+    field: 'amount',
+    operator: 'EXCEEDS_RATIO',
+    thresholdValue: 4.0,
+    action: 'STEP_UP_2FA',
+    enabled: true,
+    priority: 2,
+    triggeredCount: 18,
+    updatedAt: new Date(Date.now() - 86400000 * 4).toISOString(),
+  },
+  {
+    id: 'rule_dev_unauth',
+    name: 'Unrecognized Device + Crypto Merchant',
+    description: 'Enacts immediate fraud review if device fingerprint is untrusted and MCC matches high-risk off-ramp.',
+    field: 'device',
+    operator: 'NOT_EQUALS',
+    thresholdValue: 'KNOWN_WHITELIST',
+    action: 'FLAG',
+    enabled: true,
+    priority: 3,
+    triggeredCount: 31,
+    updatedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
+  },
+  {
+    id: 'rule_country_sanctions',
+    name: 'High-Risk Sanctions Corridor Ingestion',
+    description: 'Enforces hard freeze on payments routed through restricted financial jurisdictions.',
+    field: 'country',
+    operator: 'EQUALS',
+    thresholdValue: 'RESTRICTED_LIST',
+    action: 'FREEZE',
+    enabled: false,
+    priority: 4,
+    triggeredCount: 3,
+    updatedAt: new Date(Date.now() - 86400000 * 8).toISOString(),
+  },
+];
+
 const auditLogsStore: AuditRecord[] = [
   {
     id: 'aud_9011',
@@ -166,11 +251,18 @@ let transactionsStore: StoredTransaction[] = [
     merchant: 'Unrecognized Tech Vendor',
     category: 'Electronics & Hardware',
     location: 'Lagos, NG',
+    originLocation: 'Accra, GH',
+    originCoords: { lat: 5.6037, lng: -0.1870 },
+    locationCoords: { lat: 6.5244, lng: 3.3792 },
+    travelDistanceKm: 402,
+    timeDeltaMinutes: 2.5,
+    calculatedKmhSpeed: 9648,
     deviceId: 'dev_new_882',
     timestamp: new Date(Date.now() - 1000 * 60 * 4).toISOString(),
     fraudProbability: 0.94,
     flagged: true,
     status: 'PENDING_REVIEW',
+    mobile2FAStatus: 'NONE',
     llmInvestigation: {
       summary: 'High risk transaction flagged.',
       reasons: [
@@ -200,11 +292,18 @@ let transactionsStore: StoredTransaction[] = [
     merchant: 'CryptoExchange P2P Gateway',
     category: 'Cryptocurrency & Financial',
     location: 'Bucharest, RO',
+    originLocation: 'New York, US',
+    originCoords: { lat: 40.7128, lng: -74.0060 },
+    locationCoords: { lat: 44.4268, lng: 26.1025 },
+    travelDistanceKm: 7640,
+    timeDeltaMinutes: 35,
+    calculatedKmhSpeed: 13097,
     deviceId: 'dev_unknown_441',
     timestamp: new Date(Date.now() - 1000 * 60 * 18).toISOString(),
     fraudProbability: 0.89,
     flagged: true,
     status: 'PENDING_REVIEW',
+    mobile2FAStatus: 'NONE',
     llmInvestigation: {
       summary: 'Suspicious crypto off-ramp detected from unfamiliar European IP.',
       reasons: [
@@ -513,6 +612,9 @@ app.post('/api/v1/score', async (req: Request, res: Response) => {
       );
     }
 
+    const isGeoAnomaly = evaluation.riskFactors?.isGeoAnomaly;
+    const originLocation = evaluation.profile.knownLocations[0] || 'Primary Residence';
+
     const newTx: StoredTransaction = {
       id: txId,
       userId: user_id,
@@ -522,11 +624,16 @@ app.post('/api/v1/score', async (req: Request, res: Response) => {
       merchant,
       category: 'General Commerce',
       location,
+      originLocation,
+      travelDistanceKm: isGeoAnomaly ? 840 : 12,
+      timeDeltaMinutes: isGeoAnomaly ? 4 : 120,
+      calculatedKmhSpeed: isGeoAnomaly ? 12600 : 6,
       deviceId: device_id,
       timestamp: new Date().toISOString(),
       fraudProbability: evaluation.probability,
       flagged: evaluation.flagged,
       status: evaluation.flagged ? 'PENDING_REVIEW' : 'AUTO_APPROVED',
+      mobile2FAStatus: 'NONE',
       llmInvestigation: llmInvestigation || undefined,
       riskFactors: evaluation.riskFactors,
       shapValues: evaluation.shapValues,
@@ -602,6 +709,243 @@ app.get('/api/v1/audit-logs', (_req: Request, res: Response) => {
   res.json(auditLogsStore);
 });
 
+// 5b. GET /api/v1/rules - Rules Engine definitions
+app.get('/api/v1/rules', (_req: Request, res: Response) => {
+  res.json(fraudRulesStore);
+});
+
+// 5c. PUT /api/v1/rules/:id/toggle - Toggle rule enable/disable
+app.put('/api/v1/rules/:id/toggle', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const rule = fraudRulesStore.find(r => r.id === id);
+  if (!rule) {
+    res.status(404).json({ error: 'Rule not found' });
+    return;
+  }
+  rule.enabled = !rule.enabled;
+  rule.updatedAt = new Date().toISOString();
+
+  // Audit log rule change
+  auditLogsStore.unshift({
+    id: `aud_${Date.now().toString().slice(-5)}`,
+    transactionId: 'SYS_POLICY',
+    userId: 'secops_admin',
+    action: 'AUTO_TRIGGER',
+    actor: 'Fraud Risk Architect',
+    notes: `Rule [${rule.name}] was ${rule.enabled ? 'ENABLED' : 'DISABLED'}`,
+    timestamp: new Date().toISOString(),
+    previousStatus: rule.enabled ? 'DISABLED' : 'ENABLED',
+    newStatus: rule.enabled ? 'ENABLED' : 'DISABLED',
+    riskScore: 0,
+    llmSummary: `Policy updated for rule ${rule.id}`,
+  });
+
+  res.json({ success: true, rule });
+});
+
+// 5c-2. POST /api/v1/rules - Custom Rule Creator
+app.post('/api/v1/rules', (req: Request, res: Response) => {
+  const { name, description, field, operator, thresholdValue, action } = req.body;
+  if (!name || !field || !operator || thresholdValue === undefined || !action) {
+    res.status(400).json({ error: 'Missing required rule parameters' });
+    return;
+  }
+
+  const newRule: FraudRuleEntity = {
+    id: `rule_custom_${Date.now().toString().slice(-6)}`,
+    name,
+    description: description || `Policy checking ${field} ${operator} ${thresholdValue}`,
+    field,
+    operator,
+    thresholdValue,
+    action,
+    enabled: true,
+    priority: fraudRulesStore.length + 1,
+    triggeredCount: 0,
+    updatedAt: new Date().toISOString(),
+  };
+
+  fraudRulesStore.unshift(newRule);
+
+  auditLogsStore.unshift({
+    id: `aud_${Date.now().toString().slice(-5)}`,
+    transactionId: 'SYS_POLICY_NEW',
+    userId: 'secops_admin',
+    action: 'AUTO_TRIGGER',
+    actor: 'Fraud Risk Architect',
+    notes: `Created custom rule: [${newRule.name}] (${newRule.action})`,
+    timestamp: new Date().toISOString(),
+    previousStatus: 'NEW',
+    newStatus: 'ENABLED',
+    riskScore: 0,
+    llmSummary: `Custom policy directive registered.`,
+  });
+
+  res.status(201).json({ success: true, rule: newRule });
+});
+
+// 5c-3. POST /api/v1/rules/backtest - Backtesting Engine against historical transactions
+app.post('/api/v1/rules/backtest', (req: Request, res: Response) => {
+  const { field, operator, thresholdValue, action } = req.body;
+  if (!field || !operator || thresholdValue === undefined) {
+    res.status(400).json({ error: 'Incomplete rule configuration for backtest' });
+    return;
+  }
+
+  const dataset = transactionsStore;
+  const total = dataset.length;
+  let triggeredCount = 0;
+  let falsePositiveCount = 0;
+  let trueFraudCount = 0;
+
+  dataset.forEach((tx) => {
+    let matches = false;
+    if (field === 'amount') {
+      const val = Number(thresholdValue);
+      if (operator === 'GREATER_THAN' && tx.amount > val) matches = true;
+      if (operator === 'EXCEEDS_RATIO') {
+        const ratio = tx.riskFactors?.amountDeviationRatio || (tx.amount / 500);
+        if (ratio >= val) matches = true;
+      }
+    } else if (field === 'velocity') {
+      const speed = tx.calculatedKmhSpeed || 0;
+      if (operator === 'GREATER_THAN' && speed > Number(thresholdValue)) matches = true;
+    } else if (field === 'device') {
+      if (operator === 'NOT_EQUALS' && tx.riskFactors?.isNewDevice) matches = true;
+    } else if (field === 'country') {
+      if (tx.location.toLowerCase().includes(String(thresholdValue).toLowerCase())) matches = true;
+    }
+
+    if (matches) {
+      triggeredCount++;
+      if (tx.fraudProbability >= 0.75) {
+        trueFraudCount++;
+      } else {
+        falsePositiveCount++;
+      }
+    }
+  });
+
+  const precision = triggeredCount > 0 ? (trueFraudCount / triggeredCount) * 100 : 100;
+  const triggerRate = total > 0 ? (triggeredCount / total) * 100 : 0;
+
+  res.json({
+    total_evaluated: total,
+    triggered_count: triggeredCount,
+    true_fraud_hits: trueFraudCount,
+    potential_false_positives: falsePositiveCount,
+    estimated_precision_pct: Number(precision.toFixed(1)),
+    trigger_rate_pct: Number(triggerRate.toFixed(1)),
+    recommendation: precision >= 80 ? 'HIGH_ACCURACY_SAFE_TO_DEPLOY' : 'HIGH_FALSE_POSITIVE_RISK',
+  });
+});
+
+// 5c-4. GET /api/v1/stream - Server-Sent Events (SSE) Live Kafka Authorizations Stream
+app.get('/api/v1/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  // Send initial connection packet
+  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', message: 'Kafka SSE Stream Active', tps: 84 })}\n\n`);
+
+  const interval = setInterval(() => {
+    // Generate synthetic in-flight card authorization
+    const users = Object.keys(userProfiles);
+    const randomUser = users[Math.floor(Math.random() * users.length)];
+    const isSuspicious = Math.random() < 0.25;
+
+    const synthPayload = {
+      user_id: randomUser,
+      amount: isSuspicious ? 1200 + Math.floor(Math.random() * 4000) : 15 + Math.floor(Math.random() * 120),
+      merchant: isSuspicious ? 'High-Risk P2P Gateway' : 'Everyday Merchant Retail',
+      location: isSuspicious ? 'Bucharest, RO' : 'New York, US',
+      device_id: isSuspicious ? 'dev_unrec_' + Math.floor(Math.random() * 999) : 'dev_pixel_990',
+    };
+
+    const evalResult = computeFraudScore(synthPayload);
+    const txId = `tx_${Date.now().toString().slice(-6)}`;
+    const newTx: StoredTransaction = {
+      id: txId,
+      userId: synthPayload.user_id,
+      userName: evalResult.profile.name,
+      amount: synthPayload.amount,
+      currency: 'USD',
+      merchant: synthPayload.merchant,
+      category: isSuspicious ? 'High-Risk' : 'General Commerce',
+      location: synthPayload.location,
+      deviceId: synthPayload.device_id,
+      timestamp: new Date().toISOString(),
+      fraudProbability: evalResult.probability,
+      flagged: evalResult.flagged,
+      status: evalResult.flagged ? 'PENDING_REVIEW' : 'AUTO_APPROVED',
+      mobile2FAStatus: 'NONE',
+      riskFactors: evalResult.riskFactors,
+      shapValues: evalResult.shapValues,
+    };
+
+    transactionsStore.unshift(newTx);
+    if (transactionsStore.length > 100) transactionsStore.pop();
+
+    const tps = 78 + Math.floor(Math.random() * 15);
+    res.write(`data: ${JSON.stringify({ type: 'TRANSACTION', transaction: newTx, tps })}\n\n`);
+  }, 3000);
+
+  req.on('close', () => {
+    clearInterval(interval);
+  });
+});
+
+// 5d. GET /api/v1/export/transactions.csv - Direct CSV Export for SecOps teams
+app.get('/api/v1/export/transactions.csv', (_req: Request, res: Response) => {
+  const headers = ['TransactionID', 'UserID', 'Cardholder', 'Amount', 'Currency', 'Merchant', 'Location', 'FraudProbability', 'Status', 'Timestamp'];
+  const rows = transactionsStore.map(t => [
+    t.id,
+    t.userId,
+    `"${(t.userName || '').replace(/"/g, '""')}"`,
+    t.amount.toFixed(2),
+    t.currency,
+    `"${t.merchant.replace(/"/g, '""')}"`,
+    `"${t.location.replace(/"/g, '""')}"`,
+    (t.fraudProbability * 100).toFixed(1) + '%',
+    t.status,
+    t.timestamp
+  ]);
+  const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="wayo_transactions_export.csv"');
+  res.send(csvContent);
+});
+
+// 5e. POST /api/v1/score/batch - High throughput batch evaluation
+app.post('/api/v1/score/batch', (req: Request, res: Response) => {
+  const { batch } = req.body;
+  if (!Array.isArray(batch)) {
+    res.status(400).json({ error: 'Batch must be an array of transaction payloads' });
+    return;
+  }
+
+  const results = batch.map((item: any, idx: number) => {
+    const evalResult = computeFraudScore(item);
+    return {
+      index: idx,
+      user_id: item.user_id,
+      amount: item.amount,
+      fraud_probability: evalResult.probability,
+      flagged: evalResult.flagged,
+      latency_ms: 18 + Math.floor(Math.random() * 8),
+    };
+  });
+
+  res.json({
+    total_evaluated: results.length,
+    total_flagged: results.filter(r => r.flagged).length,
+    average_batch_latency_ms: 22,
+    evaluations: results,
+  });
+});
+
 // 6. POST /api/v1/investigations/:id/action
 app.post('/api/v1/investigations/:id/action', (req: Request, res: Response) => {
   const { id } = req.params;
@@ -631,6 +975,7 @@ app.post('/api/v1/investigations/:id/action', (req: Request, res: Response) => {
   } else if (action === 'REQUEST_2FA') {
     newStatus = 'PENDING_REVIEW';
     tx.status = 'PENDING_REVIEW';
+    tx.mobile2FAStatus = 'REQUESTED';
   } else if (action === 'ESCALATE') {
     newStatus = 'PENDING_REVIEW';
     tx.status = 'PENDING_REVIEW';
@@ -667,6 +1012,77 @@ app.post('/api/v1/investigations/:id/action', (req: Request, res: Response) => {
   auditLogsStore.unshift(auditRecord);
 
   res.json({ success: true, transaction: tx, auditRecord });
+});
+
+// 7. POST /api/v1/investigations/:id/2fa-response (Cardholder mobile push response simulator)
+app.post('/api/v1/investigations/:id/2fa-response', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { decision } = req.body; // 'CONFIRMED_USER' | 'DENIED_FRAUD'
+
+  const tx = transactionsStore.find(t => t.id === id);
+  if (!tx) {
+    res.status(404).json({ error: 'Transaction not found' });
+    return;
+  }
+
+  const previousStatus = tx.status;
+  tx.mobile2FAStatus = decision;
+  tx.mobile2FAResponseTime = new Date().toISOString();
+
+  if (decision === 'CONFIRMED_USER') {
+    tx.status = 'APPROVED';
+    if (!tx.auditTrail) tx.auditTrail = [];
+    tx.auditTrail.unshift({
+      timestamp: new Date().toISOString(),
+      actor: 'Cardholder (Mobile Biometric 2FA)',
+      action: 'APPROVE',
+      details: 'Cardholder verified legitimacy via FaceID / push prompt.',
+    });
+
+    auditLogsStore.unshift({
+      id: `aud_${Date.now().toString().slice(-5)}`,
+      transactionId: tx.id,
+      userId: tx.userId,
+      action: 'APPROVE',
+      actor: 'Cardholder (Wayo Mobile 2FA)',
+      notes: 'Customer confirmed transaction in mobile push prompt.',
+      timestamp: new Date().toISOString(),
+      previousStatus,
+      newStatus: 'APPROVED',
+      riskScore: tx.fraudProbability,
+      shapSummary: tx.shapValues,
+      llmSummary: '2FA Step-up verified by account holder.',
+    });
+  } else {
+    tx.status = 'FROZEN';
+    if (userProfiles[tx.userId]) {
+      userProfiles[tx.userId].isAccountFrozen = true;
+    }
+    if (!tx.auditTrail) tx.auditTrail = [];
+    tx.auditTrail.unshift({
+      timestamp: new Date().toISOString(),
+      actor: 'Cardholder (Mobile Biometric 2FA)',
+      action: 'FREEZE',
+      details: 'Cardholder flagged fraudulent activity in push notification. Account immediately frozen.',
+    });
+
+    auditLogsStore.unshift({
+      id: `aud_${Date.now().toString().slice(-5)}`,
+      transactionId: tx.id,
+      userId: tx.userId,
+      action: 'FREEZE',
+      actor: 'Cardholder (Wayo Mobile 2FA)',
+      notes: 'Cardholder denied attempting transaction. Emergency card freeze enacted.',
+      timestamp: new Date().toISOString(),
+      previousStatus,
+      newStatus: 'FROZEN',
+      riskScore: tx.fraudProbability,
+      shapSummary: tx.shapValues,
+      llmSummary: 'Account holder denied initiating transaction.',
+    });
+  }
+
+  res.json({ success: true, transaction: tx });
 });
 
 // 6. GET /api/v1/users/:id/profile
@@ -732,6 +1148,9 @@ app.post('/api/v1/simulate', async (req: Request, res: Response) => {
     );
   }
 
+  const isGeoAnomaly = evaluation.riskFactors?.isGeoAnomaly;
+  const originLocation = evaluation.profile.knownLocations[0] || 'Primary Residence';
+
   const newTx: StoredTransaction = {
     id: txId,
     userId: payload.user_id,
@@ -741,13 +1160,19 @@ app.post('/api/v1/simulate', async (req: Request, res: Response) => {
     merchant: payload.merchant,
     category: 'E-Commerce',
     location: payload.location,
+    originLocation,
+    travelDistanceKm: isGeoAnomaly ? 402 : 8,
+    timeDeltaMinutes: isGeoAnomaly ? 2.5 : 90,
+    calculatedKmhSpeed: isGeoAnomaly ? 9648 : 5,
     deviceId: payload.device_id,
     timestamp: new Date().toISOString(),
     fraudProbability: evaluation.probability,
     flagged: evaluation.flagged,
     status: evaluation.flagged ? 'PENDING_REVIEW' : 'AUTO_APPROVED',
+    mobile2FAStatus: 'NONE',
     llmInvestigation: llmInvestigation || undefined,
     riskFactors: evaluation.riskFactors,
+    shapValues: evaluation.shapValues,
   };
 
   transactionsStore.unshift(newTx);
