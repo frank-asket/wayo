@@ -1,0 +1,8 @@
+{
+  "name": "Wayo Fraud Investigation",
+  "description": "AI-Powered Financial Fraud Detection and Investigation System with real-time scoring, anomaly explanations, and analyst action console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
